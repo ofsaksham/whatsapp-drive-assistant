@@ -1,0 +1,666 @@
+{
+  "name": "WhatsApp Google Drive Assistant",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "whatsapp-webhook",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [240, 300],
+      "webhookId": "whatsapp-webhook"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse incoming WhatsApp message from Twilio\nconst body = $input.first().json;\nconst message = body.Body || '';\nconst from = body.From || '';\nconst to = body.To || '';\n\n// Extract command and parameters\nconst parts = message.trim().split(' ');\nconst command = parts[0].toUpperCase();\nconst params = parts.slice(1);\n\n// Validate command\nconst validCommands = ['LIST', 'DELETE', 'MOVE', 'SUMMARY', 'HELP', 'STATUS'];\n\nif (!validCommands.includes(command)) {\n  return {\n    json: {\n      error: true,\n      message: 'Invalid command. Use HELP for available commands.',\n      from,\n      to,\n      originalMessage: message\n    }\n  };\n}\n\n// Check for confirmation for destructive operations\nconst hasConfirmation = params.includes('CONFIRM');\nconst filteredParams = params.filter(p => p !== 'CONFIRM');\n\nreturn {\n  json: {\n    command,\n    params: filteredParams,\n    hasConfirmation,\n    from,\n    to,\n    originalMessage: message,\n    timestamp: new Date().toISOString()\n  }\n};"
+      },
+      "id": "message-parser",
+      "name": "Parse Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "command-check",
+              "leftValue": "={{ $json.command }}",
+              "rightValue": "HELP",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "command-router",
+      "name": "Route Command",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Generate help message\nconst helpText = `🤖 *WhatsApp Google Drive Assistant*\n\n*Available Commands:*\n\n📁 *LIST /folder* - List files in folder\n🗑️ *DELETE /file CONFIRM* - Delete file (requires CONFIRM)\n📂 *MOVE /source /dest* - Move file/folder\n📄 *SUMMARY /folder* - Summarize documents\n❓ *HELP* - Show this help\n📊 *STATUS* - Check system status\n\n*Examples:*\n• LIST /ProjectX\n• DELETE /ProjectX/report.pdf CONFIRM\n• MOVE /ProjectX/report.pdf /Archive\n• SUMMARY /ProjectX\n\n⚠️ *Safety:* Destructive operations require CONFIRM keyword.`;\n\nreturn {\n  json: {\n    response: helpText,\n    from: $('Parse Message').first().json.from,\n    to: $('Parse Message').first().json.to\n  }\n};"
+      },
+      "id": "help-handler",
+      "name": "Help Handler",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 200]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "list-check",
+              "leftValue": "={{ $json.command }}",
+              "rightValue": "LIST",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "list-router",
+      "name": "List Router",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "resource": "file",
+        "operation": "list",
+        "folderId": "={{ $json.params[0] || 'root' }}",
+        "options": {
+          "pageSize": 50,
+          "fields": "files(id,name,mimeType,size,modifiedTime,parents)"
+        }
+      },
+      "id": "google-drive-list",
+      "name": "List Files",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 2,
+      "position": [1120, 300],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "google-drive-credentials",
+          "name": "Google Drive OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Format file list response\nconst files = $input.first().json.files || [];\nconst folderPath = $('Parse Message').first().json.params[0] || 'root';\n\nif (files.length === 0) {\n  return {\n    json: {\n      response: `📁 *${folderPath}* is empty.`,\n      from: $('Parse Message').first().json.from,\n      to: $('Parse Message').first().json.to\n    }\n  };\n}\n\nlet response = `📁 *Files in ${folderPath}:*\n\n`;\n\nfiles.forEach((file, index) => {\n  const icon = file.mimeType.includes('folder') ? '📂' : '📄';\n  const size = file.size ? ` (${(file.size / 1024).toFixed(1)} KB)` : '';\n  const modified = new Date(file.modifiedTime).toLocaleDateString();\n  \n  response += `${index + 1}. ${icon} *${file.name}*${size}\n   📅 ${modified}\n\n`;\n});\n\nresponse += `\\nTotal: ${files.length} item(s)`;\n\nreturn {\n  json: {\n    response,\n    from: $('Parse Message').first().json.from,\n    to: $('Parse Message').first().json.to,\n    files: files\n  }\n};"
+      },
+      "id": "format-list-response",
+      "name": "Format List Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1340, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "delete-check",
+              "leftValue": "={{ $json.command }}",
+              "rightValue": "DELETE",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "delete-router",
+      "name": "Delete Router",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [900, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Check if deletion is confirmed\nconst hasConfirmation = $('Parse Message').first().json.hasConfirmation;\nconst filePath = $('Parse Message').first().json.params[0];\n\nif (!hasConfirmation) {\n  return {\n    json: {\n      response: `⚠️ *Safety Check Required*\\n\\nTo delete *${filePath}*, add CONFIRM to your command:\\n\\nDELETE ${filePath} CONFIRM\\n\\nThis prevents accidental deletions.`,\n      from: $('Parse Message').first().json.from,\n      to: $('Parse Message').first().json.to,\n      skipOperation: true\n    }\n  };\n}\n\nif (!filePath) {\n  return {\n    json: {\n      response: '❌ Please specify a file path to delete.\\n\\nExample: DELETE /ProjectX/report.pdf CONFIRM',\n      from: $('Parse Message').first().json.from,\n      to: $('Parse Message').first().json.to,\n      skipOperation: true\n    }\n  };\n}\n\nreturn {\n  json: {\n    filePath,\n    from: $('Parse Message').first().json.from,\n    to: $('Parse Message').first().json.to\n  }\n};"
+      },
+      "id": "delete-safety-check",
+      "name": "Delete Safety Check",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 400]
+    },
+    {
+      "parameters": {
+        "resource": "file",
+        "operation": "delete",
+        "fileId": "={{ $json.fileId }}"
+      },
+      "id": "google-drive-delete",
+      "name": "Delete File",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 2,
+      "position": [1340, 400],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "google-drive-credentials",
+          "name": "Google Drive OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Handle delete response\nconst success = $input.first().json.success;\nconst filePath = $('Delete Safety Check').first().json.filePath;\n\nif (success) {\n  return {\n    json: {\n      response: `✅ *File deleted successfully*\\n\\n🗑️ ${filePath}\\n\\nThe file has been permanently removed from Google Drive.`,\n      from: $('Delete Safety Check').first().json.from,\n      to: $('Delete Safety Check').first().json.to\n    }\n  };\n} else {\n  return {\n    json: {\n      response: `❌ *Delete failed*\\n\\nCould not delete ${filePath}. Please check if the file exists and you have permission.`,\n      from: $('Delete Safety Check').first().json.from,\n      to: $('Delete Safety Check').first().json.to\n    }\n  };\n}"
+      },
+      "id": "delete-response",
+      "name": "Delete Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1560, 400]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "move-check",
+              "leftValue": "={{ $json.command }}",
+              "rightValue": "MOVE",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "move-router",
+      "name": "Move Router",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [900, 500]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Validate move parameters\nconst params = $('Parse Message').first().json.params;\n\nif (params.length < 2) {\n  return {\n    json: {\n      response: '❌ *Move command requires source and destination*\\n\\nExample: MOVE /ProjectX/report.pdf /Archive',\n      from: $('Parse Message').first().json.from,\n      to: $('Parse Message').first().json.to,\n      skipOperation: true\n    }\n  };\n}\n\nconst sourcePath = params[0];\nconst destPath = params[1];\n\nreturn {\n  json: {\n    sourcePath,\n    destPath,\n    from: $('Parse Message').first().json.from,\n    to: $('Parse Message').first().json.to\n  }\n};"
+      },
+      "id": "move-validator",
+      "name": "Move Validator",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 500]
+    },
+    {
+      "parameters": {
+        "resource": "file",
+        "operation": "update",
+        "fileId": "={{ $json.fileId }}",
+        "updateFields": {
+          "parents": "={{ $json.destFolderId }}"
+        }
+      },
+      "id": "google-drive-move",
+      "name": "Move File",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 2,
+      "position": [1340, 500],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "google-drive-credentials",
+          "name": "Google Drive OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Handle move response\nconst success = $input.first().json.success;\nconst sourcePath = $('Move Validator').first().json.sourcePath;\nconst destPath = $('Move Validator').first().json.destPath;\n\nif (success) {\n  return {\n    json: {\n      response: `✅ *File moved successfully*\\n\\n📂 ${sourcePath} → ${destPath}\\n\\nThe file has been moved to the new location.`,\n      from: $('Move Validator').first().json.from,\n      to: $('Move Validator').first().json.to\n    }\n  };\n} else {\n  return {\n    json: {\n      response: `❌ *Move failed*\\n\\nCould not move ${sourcePath} to ${destPath}. Please check paths and permissions.`,\n      from: $('Move Validator').first().json.from,\n      to: $('Move Validator').first().json.to\n    }\n  };\n}"
+      },
+      "id": "move-response",
+      "name": "Move Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1560, 500]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "summary-check",
+              "leftValue": "={{ $json.command }}",
+              "rightValue": "SUMMARY",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "summary-router",
+      "name": "Summary Router",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [900, 600]
+    },
+    {
+      "parameters": {
+        "resource": "file",
+        "operation": "list",
+        "folderId": "={{ $json.params[0] || 'root' }}",
+        "options": {
+          "pageSize": 50,
+          "fields": "files(id,name,mimeType,size,modifiedTime)",
+          "q": "mimeType contains 'application/pdf' or mimeType contains 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' or mimeType contains 'text/plain'"
+        }
+      },
+      "id": "get-documents",
+      "name": "Get Documents",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 2,
+      "position": [1120, 600],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "google-drive-credentials",
+          "name": "Google Drive OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "file",
+        "operation": "get",
+        "fileId": "={{ $json.fileId }}",
+        "options": {
+          "alt": "media"
+        }
+      },
+      "id": "get-file-content",
+      "name": "Get File Content",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 2,
+      "position": [1340, 600],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "google-drive-credentials",
+          "name": "Google Drive OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "authentication": "apiKey",
+        "model": "gpt-4o",
+        "prompt": "={{ $json.prompt }}",
+        "options": {
+          "maxTokens": 500,
+          "temperature": 0.3
+        }
+      },
+      "id": "openai-summarize",
+      "name": "Summarize with OpenAI",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 1,
+      "position": [1560, 600],
+      "credentials": {
+        "openAiApi": {
+          "id": "openai-credentials",
+          "name": "OpenAI API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Combine all summaries\nconst documents = $('Get Documents').first().json.files || [];\nconst summaries = $input.all().map(item => item.json);\nconst folderPath = $('Parse Message').first().json.params[0] || 'root';\n\nif (documents.length === 0) {\n  return {\n    json: {\n      response: `📄 *No documents found in ${folderPath}*\\n\\nSupported formats: PDF, DOCX, TXT`,\n      from: $('Parse Message').first().json.from,\n      to: $('Parse Message').first().json.to\n    }\n  };\n}\n\nlet response = `📄 *Document Summaries for ${folderPath}*\\n\\n`;\n\nsummaries.forEach((summary, index) => {\n  const doc = documents[index];\n  response += `*${index + 1}. ${doc.name}*\\n${summary.text}\\n\\n`;\n});\n\nresponse += `\\n📊 Total documents summarized: ${documents.length}`;\n\nreturn {\n  json: {\n    response,\n    from: $('Parse Message').first().json.from,\n    to: $('Parse Message').first().json.to\n  }\n};"
+      },
+      "id": "combine-summaries",
+      "name": "Combine Summaries",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1780, 600]
+    },
+    {
+      "parameters": {
+        "authentication": "basicAuth",
+        "accountSid": "={{ $env.TWILIO_ACCOUNT_SID }}",
+        "authToken": "={{ $env.TWILIO_AUTH_TOKEN }}",
+        "from": "={{ $env.TWILIO_WHATSAPP_NUMBER }}",
+        "to": "={{ $json.to }}",
+        "body": "={{ $json.response }}"
+      },
+      "id": "send-whatsapp-response",
+      "name": "Send WhatsApp Response",
+      "type": "n8n-nodes-base.twilio",
+      "typeVersion": 1,
+      "position": [2000, 300],
+      "credentials": {
+        "twilioApi": {
+          "id": "twilio-credentials",
+          "name": "Twilio API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Log operation to audit trail\nconst operation = {\n  timestamp: new Date().toISOString(),\n  command: $('Parse Message').first().json.command,\n  params: $('Parse Message').first().json.params,\n  from: $('Parse Message').first().json.from,\n  response: $json.response,\n  success: !$json.response.includes('❌')\n};\n\n// You can extend this to save to Google Sheets or database\nconsole.log('AUDIT LOG:', JSON.stringify(operation, null, 2));\n\nreturn $input.first();"
+      },
+      "id": "audit-logger",
+      "name": "Audit Logger",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2200, 300]
+    }
+  ],
+  "connections": {
+    "Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "Parse Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Message": {
+      "main": [
+        [
+          {
+            "node": "Route Command",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Command": {
+      "main": [
+        [
+          {
+            "node": "Help Handler",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "List Router",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Delete Router",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Move Router",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Summary Router",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Help Handler": {
+      "main": [
+        [
+          {
+            "node": "Send WhatsApp Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List Router": {
+      "main": [
+        [
+          {
+            "node": "List Files",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List Files": {
+      "main": [
+        [
+          {
+            "node": "Format List Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format List Response": {
+      "main": [
+        [
+          {
+            "node": "Send WhatsApp Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Delete Router": {
+      "main": [
+        [
+          {
+            "node": "Delete Safety Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Delete Safety Check": {
+      "main": [
+        [
+          {
+            "node": "Delete File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Delete File": {
+      "main": [
+        [
+          {
+            "node": "Delete Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Delete Response": {
+      "main": [
+        [
+          {
+            "node": "Send WhatsApp Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Move Router": {
+      "main": [
+        [
+          {
+            "node": "Move Validator",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Move Validator": {
+      "main": [
+        [
+          {
+            "node": "Move File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Move File": {
+      "main": [
+        [
+          {
+            "node": "Move Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Move Response": {
+      "main": [
+        [
+          {
+            "node": "Send WhatsApp Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Summary Router": {
+      "main": [
+        [
+          {
+            "node": "Get Documents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Documents": {
+      "main": [
+        [
+          {
+            "node": "Get File Content",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get File Content": {
+      "main": [
+        [
+          {
+            "node": "Summarize with OpenAI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Summarize with OpenAI": {
+      "main": [
+        [
+          {
+            "node": "Combine Summaries",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Combine Summaries": {
+      "main": [
+        [
+          {
+            "node": "Send WhatsApp Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send WhatsApp Response": {
+      "main": [
+        [
+          {
+            "node": "Audit Logger",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 1,
+  "updatedAt": "2024-01-01T00:00:00.000Z",
+  "versionId": "1"
+} 
